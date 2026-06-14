@@ -309,202 +309,227 @@ function MessageContent({ content }) {
   );
 }
 
-// --- MOCK DATA ---
+// Helper to parse the vulnerability report from the markdown text
+function parseVulnReport(text) {
+  if (!text) return null;
+  
+  // Look for the exact bold headers (case insensitive/trimmed match support)
+  const matchedVulnIndex = text.indexOf('**Matched Vulnerability**');
+  const categoryIndex = text.indexOf('**Category**');
+  const severityIndex = text.indexOf('**Severity**');
+  const remediationIndex = text.indexOf('**Remediation**');
+  
+  if (matchedVulnIndex === -1 || categoryIndex === -1 || severityIndex === -1 || remediationIndex === -1) {
+    return null; // Not a structured report block
+  }
+  
+  // Extract values between headers
+  const matched_vulnerability = text.substring(matchedVulnIndex + '**Matched Vulnerability**'.length, categoryIndex).trim();
+  const category = text.substring(categoryIndex + '**Category**'.length, severityIndex).trim();
+  const severity = text.substring(severityIndex + '**Severity**'.length, remediationIndex).trim();
+  const remediation = text.substring(remediationIndex + '**Remediation**'.length).trim();
+  
+  return {
+    matched_vulnerability,
+    category,
+    severity,
+    remediation
+  };
+}
 
-const PRELOADED_CHATS = {
-  1: [
-    {
-      id: 'msg-1',
-      role: 'user',
-      content: 'What is SQL injection and how dangerous is it?'
-    },
-    {
-      id: 'msg-2',
-      role: 'assistant',
-      content: `SQL Injection (SQLi) is one of the most common and destructive web application vulnerabilities. It occurs when untrusted user input is directly concatenated into a database query without proper sanitization or parameterization. This allows an attacker to manipulate the query's structure and execute arbitrary SQL statements directly on the database.
+// Helper to parse remediation into structured sections
+function parseRemediation(text) {
+  if (!text) return [];
+  
+  // Find indices of headings
+  const immediateIndex = text.indexOf('IMMEDIATE ACTIONS:');
+  const verificationIndex = text.indexOf('VERIFICATION:');
+  const longTermIndex = text.indexOf('LONG-TERM MEASURES:');
+  
+  const sections = [];
+  
+  if (immediateIndex !== -1) {
+    const end = verificationIndex !== -1 ? verificationIndex : (longTermIndex !== -1 ? longTermIndex : text.length);
+    sections.push({
+      title: 'IMMEDIATE ACTIONS',
+      content: text.substring(immediateIndex + 'IMMEDIATE ACTIONS:'.length, end).trim()
+    });
+  }
+  
+  if (verificationIndex !== -1) {
+    const end = longTermIndex !== -1 ? longTermIndex : text.length;
+    sections.push({
+      title: 'VERIFICATION',
+      content: text.substring(verificationIndex + 'VERIFICATION:'.length, end).trim()
+    });
+  }
+  
+  if (longTermIndex !== -1) {
+    sections.push({
+      title: 'LONG-TERM MEASURES',
+      content: text.substring(longTermIndex + 'LONG-TERM MEASURES:'.length).trim()
+    });
+  }
+  
+  // Fallback if none of the headings are found
+  if (sections.length === 0) {
+    sections.push({
+      title: 'REMEDIATION',
+      content: text
+    });
+  }
+  
+  return sections;
+}
 
-The danger of SQL Injection cannot be overstated. Depending on the database configuration and the attacker's objectives, SQLi can lead to complete database compromise, unauthorized access to sensitive user data (such as passwords, credit card numbers, and PII), data modification or deletion, and in some cases, remote code execution on the underlying database server. It is consistently ranked as a critical threat in the OWASP Top 10.
-
-Here is a simple example of a vulnerable SQL query constructed via string concatenation:
-
-\`\`\`sql
--- Vulnerable query construction
-SELECT * FROM users WHERE username = 'admin' AND password = 'password123';
-\`\`\`
-
-In the query above, if a malicious user inputs \`' OR '1'='1\` as the username, the database sees the query as \`SELECT * FROM users WHERE username = '' OR '1'='1' AND password = '...'\`. Since \`'1'='1'\` is always true, the login is bypassed entirely, granting access without a valid password.`
-    },
-    {
-      id: 'msg-3',
-      role: 'user',
-      content: `Can you scan this login function for me?
-\`\`\`python
-def login(username, password):
-    # Retrieve connection and cursor
-    conn = get_db_connection()
-    cursor = conn.cursor()
+// React component to render a structured vulnerability analysis report card
+function VulnReport({ data, onCopy }) {
+  const [copied, setCopied] = useState(false);
+  const { matched_vulnerability, category, severity, remediation } = data;
+  
+  const handleCopy = () => {
+    // Format the remediation content using section headers
+    const remediationSections = parseRemediation(remediation);
+    const remediationFormatted = remediationSections
+      .map(s => `${s.title}:\n${s.content}`)
+      .join('\n\n');
     
-    # Vulnerable SQL Query
-    query = "SELECT * FROM users WHERE username = '" + username + "' AND password = '" + password + "'"
-    cursor.execute(query)
-    user = cursor.fetchone()
+    const textToCopy = [
+      `Matched Vulnerability:`,
+      matched_vulnerability,
+      ``,
+      `Category:`,
+      category,
+      ``,
+      `Severity:`,
+      severity,
+      ``,
+      `Remediation:`,
+      remediationFormatted
+    ].join('\n');
     
-    cursor.close()
-    conn.close()
-    return user
-\`\`\``
-    },
-    {
-      id: 'msg-4',
-      role: 'assistant',
-      content: `I've scanned your login function and identified **two significant vulnerabilities** that fall under the OWASP Top 10 guidelines. Both issues pose a high risk to the application's security.
+    navigator.clipboard.writeText(textToCopy);
+    setCopied(true);
+    if (onCopy) onCopy();
+    setTimeout(() => setCopied(false), 2000);
+  };
 
-Here are the details of the findings:
+  const remediationSections = parseRemediation(remediation);
 
-> **SQL Injection (OWASP A03:2021-Injection)**
-> **Description:** The inputs \`username\` and \`password\` are concatenated directly into the SQL query string using operator overloading (\`+\`). This allows an attacker to inject SQL payloads to bypass authentication or extract data.
-> **Fix:** Use parameterized queries (prepared statements) instead of string concatenation. This ensures user input is treated strictly as data.
+  // Determine severity color/badge styling
+  let severityClass = 'sev-info';
+  if (severity) {
+    const sevLower = severity.toLowerCase();
+    if (sevLower.includes('critical')) severityClass = 'sev-critical';
+    else if (sevLower.includes('high')) severityClass = 'sev-high';
+    else if (sevLower.includes('medium')) severityClass = 'sev-medium';
+    else if (sevLower.includes('low')) severityClass = 'sev-low';
+  }
 
-\`\`\`python
-# Safe SQL parameterization example
-query = "SELECT * FROM users WHERE username = %s AND password = %s"
-cursor.execute(query, (username, password))
-\`\`\`
+  return (
+    <div className="vuln-report-card">
 
-> **Plaintext Passwords (OWASP A02:2021-Cryptographic Failures)**
-> **Description:** The query verifies the password by comparing it in plaintext directly in the database query. If your database is compromised, all user passwords will be exposed.
-> **Fix:** Store only cryptographically hashed passwords (e.g., using \`bcrypt\`) and verify them in the application layer.
+      
+      <div className="vuln-report-grid">
+        <div className="vuln-report-item full-width">
+          <span className="vuln-report-label">Vulnerability</span>
+          <span className="vuln-report-value bold-value">{matched_vulnerability}</span>
+        </div>
+        
+        <div className="vuln-report-item">
+          <span className="vuln-report-label">Category</span>
+          <span className="vuln-report-value">{category}</span>
+        </div>
+        
+        <div className="vuln-report-item">
+          <span className="vuln-report-label">Severity</span>
+          <span className={`vuln-report-value severity-badge ${severityClass}`}>{severity}</span>
+        </div>
+      </div>
+      
+      <div className="vuln-report-divider"></div>
+      
+      <div className="vuln-report-remediation">
+        <span className="vuln-report-label" style={{ marginBottom: '12px' }}>Remediation</span>
+        <div className="remediation-sections">
+          {remediationSections.map((sec, idx) => (
+            <div key={idx} className="remediation-section">
+              <div className="remediation-title">{sec.title}</div>
+              <div className="remediation-content">
+                {renderMarkdownBlocks(sec.content)}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+      
+      <div className="vuln-report-footer">
+        <button onClick={handleCopy} className="copy-report-btn">
+          {copied ? (
+            <>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{ marginRight: '6px' }}>
+                <polyline points="20 6 9 17 4 12"></polyline>
+              </svg>
+              Copied!
+            </>
+          ) : (
+            <>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ marginRight: '6px' }}>
+                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+              </svg>
+              Copy Analysis
+            </>
+          )}
+        </button>
+      </div>
+    </div>
+  );
+}
 
-\`\`\`python
-# Safe password verification example
-# 1. Fetch user hash from database
-query = "SELECT password_hash FROM users WHERE username = %s"
-cursor.execute(query, (username,))
-result = cursor.fetchone()
+// --- LOCALSTORAGE HELPERS ---
 
-# 2. Compare using secure bcrypt helper
-if result and bcrypt.checkpw(password.encode(), result['password_hash'].encode()):
-    return user_details
-\`\`\`
+const STORAGE_KEY = 'sentrix_conversations';
 
-Let me know if you want me to go deeper on any of these.`
-    }
-  ],
-  2: [
-    {
-      id: 'msg-1',
-      role: 'user',
-      content: 'Can you scan this script for command injection?'
-    },
-    {
-      id: 'msg-2',
-      role: 'assistant',
-      content: 'Yes, please share the script. I\'ll inspect it for shell commands, system calls, and unsafe subprocess executions.'
-    },
-    {
-      id: 'msg-3',
-      role: 'user',
-      content: `Here is the python function:
-\`\`\`python
-import os
+function loadConversations() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
 
-def ping_host(host):
-    # Running ping shell command
-    return os.system("ping -c 1 " + host)
-\`\`\``
-    },
-    {
-      id: 'msg-4',
-      role: 'assistant',
-      content: `I have scanned your python script. I identified **one critical security vulnerability** related to OS Command Injection:
+function saveConversations(conversations) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(conversations));
+  } catch {
+    // Storage quota exceeded — fail silently
+  }
+}
 
-> **OS Command Injection (OWASP A03:2021-Injection)**
-> **Description:** The \`host\` parameter is concatenated directly into the command string passed to \`os.system\`. Because this runs in a shell context, an attacker could input \`127.0.0.1; rm -rf /\` or similar command separators to execute arbitrary system shell commands with the privileges of your script.
-> **Fix:** Avoid executing commands in shell contexts. Use the \`subprocess\` module with shell=False and pass arguments as a list.
-
-\`\`\`python
-# Safe command execution implementation
-import subprocess
-
-def ping_host(host):
-    # Separates arguments, runs directly without shell wrapper
-    try:
-        result = subprocess.run(
-            ["ping", "-c", "1", host],
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        return result.returncode
-    except subprocess.CalledProcessError as e:
-        return e.returncode
-\`\`\`
-
-Let me know if you want me to review any other server administration scripts!`
-    }
-  ],
-  3: [
-    {
-      id: 'msg-1',
-      role: 'user',
-      content: 'What is the difference between Reflected and Stored XSS?'
-    },
-    {
-      id: 'msg-2',
-      role: 'assistant',
-      content: `Cross-Site Scripting (XSS) is a critical injection vulnerability. The main difference between **Reflected XSS** and **Stored XSS** lies in how the payload is delivered and where it is stored:
-
-> **1. Stored XSS (Persistent XSS)**
-> **Mechanism:** The malicious payload is permanently stored on the target server (e.g., in a database, comment section, or forum post).
-> **Impact:** When any user visits the affected page, the server delivers the stored payload to their browser, where it executes automatically. This has a very high impact because it attacks every visitor.
-
-> **2. Reflected XSS (Non-Persistent XSS)**
-> **Mechanism:** The malicious payload is part of the request sent to the server (typically a URL parameter or form input) and is reflected back in the response immediately.
-> **Impact:** The victim must click a specially crafted link designed by the attacker. It only affects the individual user who clicked that specific link.
-
-To prevent both forms of XSS, always output encode user data before printing it inside HTML templates, and enforce a strict Content Security Policy (CSP).`
-    }
-  ],
-  4: [
-    {
-      id: 'msg-1',
-      role: 'user',
-      content: 'Tell me about the latest OWASP Top 10 standard.'
-    },
-    {
-      id: 'msg-2',
-      role: 'assistant',
-      content: `The OWASP Top 10 is the globally recognized standard awareness document for web application security. Updated in 2021, the list highlights the most critical security risks facing organizations:
-
-1. **A01:2021-Broken Access Control** – Users can access resources outside their intended privileges.
-2. **A02:2021-Cryptographic Failures** – Sensitive data exposure due to weak or missing encryption.
-3. **A03:2021-Injection** – SQL, Command, and XSS injection vulnerabilities.
-4. **A04:2021-Insecure Design** – Architectural flaws that cannot be fixed by implementation changes alone.
-5. **A05:2021-Security Misconfiguration** – Unhardened servers, default accounts, or overly verbose error logs.
-6. **A06:2021-Vulnerable and Outdated Components** – Running third-party libraries with known vulnerabilities.
-7. **A07:2021-Identification and Authentication Failures** – Weak session management, credentials stuffing, or credential reuse.
-8. **A08:2021-Software and Data Integrity Failures** – CI/CD pipeline issues, untrusted updates, or insecure deserialization.
-9. **A09:2021-Security Logging and Monitoring Failures** – Lack of logs that allows attackers to remain undetected.
-10. **A10:2021-Server-Side Request Forgery (SSRF)** – Forcing a server application to make requests to internal or external systems.
-
-Which of these vulnerabilities would you like to drill down into today? I can provide code remediation templates for any of them.`
-    }
-  ]
-};
-
-const CHAT_HISTORY_LIST = [
-  { id: 1, title: 'SQL Injection Security Query' },
-  { id: 2, title: 'Python Code Scan' },
-  { id: 3, title: 'XSS Vulnerability Analysis' },
-  { id: 4, title: 'OWASP Top 10 Overview' }
-];
+// Generates a conversation title from the first user message (max 45 chars)
+function generateTitle(text) {
+  const clean = text.replace(/```[\s\S]*?```/g, '').replace(/\s+/g, ' ').trim();
+  return clean.length > 45 ? clean.substring(0, 42) + '...' : clean || 'New Conversation';
+}
 
 // --- MAIN APP COMPONENT ---
+// (mock data block removed — replaced with real localStorage conversations)
+
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 export default function App() {
-  // States
-  const [messages, setMessages] = useState(PRELOADED_CHATS[1]);
-  const [activeHistoryId, setActiveHistoryId] = useState(1);
+  // ── Conversation history state (backed by localStorage) ────────────────────
+  const [conversations, setConversations] = useState(() => loadConversations());
+  const [activeConversationId, setActiveConversationId] = useState(null);
+
+  // ── Active messages derived from the active conversation ──────────────────
+  const activeConversation = conversations.find(c => c.id === activeConversationId) || null;
+  const [messages, setMessages] = useState(activeConversation ? activeConversation.messages : []);
+
+  // ── Other UI state ────────────────────────────────────────────────────────
   const [inputValue, setInputValue] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [attachment, setAttachment] = useState(null);
@@ -521,13 +546,30 @@ export default function App() {
   // Theme and Collapsible Sidebar states
   const [theme, setTheme] = useState('light');
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const [toast, setToast] = useState(null);
+
+  useEffect(() => {
+    if (toast) {
+      const timer = setTimeout(() => setToast(null), 2000);
+      return () => clearTimeout(timer);
+    }
+  }, [toast]);
+
+  const showToast = (msg) => {
+    setToast(msg);
+  };
 
   // Refs
   const messagesEndRef = useRef(null);
   const textareaRef = useRef(null);
   const fileInputRef = useRef(null);
 
-  // Auto-scroll to bottom of messages
+  // ── Persist conversations to localStorage on every change ─────────────────
+  useEffect(() => {
+    saveConversations(conversations);
+  }, [conversations]);
+
+  // ── Auto-scroll to bottom of messages ────────────────────────────────────
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isLoading]);
@@ -540,20 +582,33 @@ export default function App() {
     }
   }, [inputValue]);
 
-  // Sidebar item switching
+  // ── Switch to an existing conversation ───────────────────────────────────
   const handleSelectHistoryItem = (id) => {
-    setActiveHistoryId(id);
-    setMessages(PRELOADED_CHATS[id] || []);
-    setIsSidebarOpen(false); // Close sidebar on mobile when switching
+    const conv = conversations.find(c => c.id === id);
+    if (conv) {
+      setActiveConversationId(id);
+      setMessages(conv.messages);
+    }
+    setIsSidebarOpen(false);
   };
 
-  // Start new chat (Welcome Screen)
+  // ── Start a fresh conversation (clears active state → shows welcome screen)
   const handleNewChat = () => {
     setMessages([]);
-    setActiveHistoryId(null);
+    setActiveConversationId(null);
     setInputValue('');
     setAttachment(null);
     setIsSidebarOpen(false);
+  };
+
+  // ── Delete a conversation from sidebar ────────────────────────────────────
+  const handleDeleteConversation = (e, id) => {
+    e.stopPropagation(); // Don't trigger the select handler
+    setConversations(prev => prev.filter(c => c.id !== id));
+    if (activeConversationId === id) {
+      setMessages([]);
+      setActiveConversationId(null);
+    }
   };
 
   // Click file trigger
@@ -617,159 +672,98 @@ export default function App() {
     setAttachment(null);
   };
 
-  const submitMessage = (text) => {
-    const newMsg = {
+  const submitMessage = async (text) => {
+    const userMsg = {
       id: `msg-${Date.now()}`,
       role: 'user',
       content: text
     };
-    
-    setMessages(prev => [...prev, newMsg]);
+
+    // ── Determine if this is the first message of a new conversation ──────
+    const isNewConversation = activeConversationId === null;
+    const newConversationId = isNewConversation ? `conv-${Date.now()}` : activeConversationId;
+
+    // ── If starting a new conversation, create it immediately in the sidebar
+    if (isNewConversation) {
+      const newConv = {
+        id: newConversationId,
+        title: generateTitle(text),
+        messages: [userMsg],
+        updatedAt: Date.now()
+      };
+      setConversations(prev => [newConv, ...prev]);
+      setActiveConversationId(newConversationId);
+    } else {
+      // Append user message to existing conversation
+      setConversations(prev => prev.map(c =>
+        c.id === activeConversationId
+          ? { ...c, messages: [...c.messages, userMsg], updatedAt: Date.now() }
+          : c
+      ));
+    }
+
+    setMessages(prev => [...prev, userMsg]);
     setIsLoading(true);
-    
-    // Simulate AI thinking and typing response
-    setTimeout(() => {
+
+    try {
+      const response = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: text })
+      });
+
+      const json = await response.json();
+
       let aiResponseText = '';
-      const textLower = text.toLowerCase();
-      
-      // Keywords Matching
-      if (textLower.includes('explain sql injection') || textLower.includes('what is sql injection')) {
-        aiResponseText = `SQL Injection (SQLi) occurs when a database query is manipulated by injecting malicious inputs. For example, using \`' OR '1'='1\` can bypass login validations.
 
-To secure your SQL queries:
-- **Use Prepared Statements (Parameterized Queries):** This separates database query logic from input parameters.
-- **Use ORMs:** Most modern ORMs automatically parameterize queries by default.
-- **Least Privilege:** Ensure the database account used by the app has the minimal permission level necessary.
-
-Let me know if you would like me to write a secure query template for your specific database driver!`;
-      } 
-      else if (textLower.includes('owasp top 10') || textLower.includes('what is owasp')) {
-        aiResponseText = `The OWASP Top 10 is the standard reference for web application security. The latest major iteration (2021) covers:
-
-1. **A01:2021-Broken Access Control** - Users accessing data/endpoints outside their permissions.
-2. **A02:2021-Cryptographic Failures** - Sensitive data exposure (e.g. plaintext password storage).
-3. **A03:2021-Injection** - Including SQL Injection, Command Injection, and Cross-Site Scripting (XSS).
-4. **A04:2021-Insecure Design** - Fundamental design or architectural security flaws.
-5. **A05:2021-Security Misconfiguration** - Unhardened system configs, default credentials, verbose error responses.
-6. **A06:2021-Vulnerable & Outdated Components** - Deprecated frameworks, libraries containing known CVEs.
-7. **A07:2021-Identification & Authentication Failures** - Weak session handling or simple credential verification.
-8. **A08:2021-Software & Data Integrity Failures** - Insecure updates, CI/CD pipeline code injections.
-9. **A09:2021-Security Logging & Monitoring Failures** - Insufficient logging to identify active breaches.
-10. **A10:2021-Server-Side Request Forgery (SSRF)** - Server induced to query internal-only services.
-
-I can provide code mitigation examples for any of these. Which one would you like to review?`;
-      } 
-      else if (textLower.includes('scan my code for xss') || textLower.includes('xss') || textLower.includes('cross-site scripting')) {
-        aiResponseText = `Cross-Site Scripting (XSS) is a critical injection vulnerability where scripts are injected into benign websites. When a user loads the page, the script executes, enabling session hijacking or token theft.
-
-Here is a typical vulnerable React/HTML snippet:
-\`\`\`javascript
-// Vulnerable to XSS
-const queryParams = new URLSearchParams(window.location.search);
-const username = queryParams.get('user');
-document.getElementById('profile-header').innerHTML = 'Welcome, ' + username;
-\`\`\`
-
-To fix XSS, always output encode variables, or bind directly to texts/properties:
-\`\`\`javascript
-// Safe execution (binds text, does not parse HTML)
-document.getElementById('profile-header').textContent = 'Welcome, ' + username;
-\`\`\`
-
-If you have a front-end script, paste it here or upload the file and I will perform an immediate security scan.`;
+      if (!response.ok || !json.success) {
+        // Backend returned an error or no-match — show the message directly
+        aiResponseText = json.message || 'An unexpected error occurred. Please try again.';
+      } else {
+        // Format the structured vulnerability result as readable markdown
+        const { matched_vulnerability, category, severity, remediation } = json.data;
+        aiResponseText = [
+          `**Matched Vulnerability**`,
+          matched_vulnerability,
+          ``,
+          `**Category**`,
+          category,
+          ``,
+          `**Severity**`,
+          severity,
+          ``,
+          `**Remediation**`,
+          remediation
+        ].join('\n');
       }
-      else if (textLower.includes('def ') || textLower.includes('function ') || textLower.includes('class ') || textLower.includes('import ') || textLower.includes('`')) {
-        // Detect specific vulnerabilities in the pasted code
-        if (textLower.includes('eval(')) {
-          aiResponseText = `I have completed a static security scan on your provided code block.
 
-I found **one critical security vulnerability** aligning with the OWASP Top 10 guidelines:
+      const assistantMsg = { id: `msg-${Date.now()}`, role: 'assistant', content: aiResponseText };
 
-> **Unsafe Dynamic Execution / Eval Injection (OWASP A03:2021-Injection)**
-> **Description:** The code uses \`eval()\` to parse or execute code dynamically. If input parameters are controlled by a user, this allows arbitrary system instruction execution in the process environment.
-> **Fix:** Completely refactor to avoid \`eval()\`. Use safer data serialization standard parsers like \`json.loads()\` or switch to a key-value dictionary lookup.
+      // Append assistant response to the conversation in state + localStorage
+      setConversations(prev => prev.map(c =>
+        c.id === newConversationId
+          ? { ...c, messages: [...c.messages, assistantMsg], updatedAt: Date.now() }
+          : c
+      ));
+      setMessages(prev => [...prev, assistantMsg]);
 
-\`\`\`python
-# Safe dictionary lookup replacement example
-dispatch_table = {
-    "add": add_func,
-    "subtract": sub_func
-}
-result = dispatch_table.get(operation, default_func)(args)
-\`\`\`
-
-Let me know if you want me to audit another function!`;
-        } 
-        else if (textLower.includes('subprocess.popen') || textLower.includes('os.system') || textLower.includes('subprocess.run') && textLower.includes('shell=true')) {
-          aiResponseText = `I have completed a static security scan on your provided code block.
-
-I found **one critical security vulnerability** aligning with the OWASP Top 10 guidelines:
-
-> **OS Command Injection (OWASP A03:2021-Injection)**
-> **Description:** System shell execution is invoked with unvalidated input string concatenations. Attackers can inject command separators (like \`;\`, \`&\`, or \`|\`) to run malicious OS-level commands.
-> **Fix:** Avoid shell invocation. Set \`shell=False\` and pass commands and parameters inside a strict structured list.
-
-\`\`\`python
-# Safe command list execution
-import subprocess
-
-# Secure implementation
-subprocess.run(["ls", "-l", user_selected_directory], shell=False)
-\`\`\`
-
-Please let me know if you would like to run another scan.`;
-        } 
-        else if (textLower.includes('innerhtml') || textLower.includes('dangerouslysetinnerhtml')) {
-          aiResponseText = `I have completed a static security scan on your provided code block.
-
-I found **one high security vulnerability** aligning with the OWASP Top 10 guidelines:
-
-> **DOM-based Cross-Site Scripting (OWASP A03:2021-Injection)**
-> **Description:** Writing variables directly into elements via \`innerHTML\` or \`dangerouslySetInnerHTML\` allows attacker-injected HTML tags and script payloads to execute in victim browsers.
-> **Fix:** Replace with secure API bindings like \`textContent\` or secure sanitized HTML sanitizers such as \`DOMPurify\`.
-
-\`\`\`javascript
-// Safe element binding
-element.textContent = userSubmittedText;
-\`\`\`
-
-Let me know if you want to inspect a secure alternative!`;
-        }
-        else {
-          aiResponseText = `I have completed a security audit on your uploaded code. 
-
-I did not identify any direct critical OWASP Top 10 vulnerabilities (such as SQL Injection, OS Command Injection, or raw DOM XSS) in this specific snippet. 
-
-**Recommended Security Hardening:**
-- Ensure any database operations use strict parameterization.
-- Implement robust input validation using strict regex allow-lists on the API boundary.
-- Always use encrypted HTTPS connections for data transport.
-- Enable audit logging for all access control decisions.
-
-Let me know if you want me to inspect other modules!`;
-        }
-      } 
-      else {
-        aiResponseText = `I'm here as your Sentrix security assistant. I can explain security vulnerabilities, scan code blocks, or reference security standards like the OWASP Top 10.
-
-Try asking me:
-- **"Explain SQL Injection"**
-- **"What is OWASP Top 10?"**
-- **"Scan my code for XSS"**
-
-Or paste/upload a function code block to scan it for security issues. What can I help you secure today?`;
-      }
-      
-      const responseMsg = {
+    } catch (err) {
+      const errorMsg = {
         id: `msg-${Date.now()}`,
         role: 'assistant',
-        content: aiResponseText
+        content: 'Unable to reach the Sentrix backend. Please ensure the server is running on port 5001 and try again.'
       };
-      
-      setMessages(prev => [...prev, responseMsg]);
+      setConversations(prev => prev.map(c =>
+        c.id === newConversationId
+          ? { ...c, messages: [...c.messages, errorMsg], updatedAt: Date.now() }
+          : c
+      ));
+      setMessages(prev => [...prev, errorMsg]);
+    } finally {
       setIsLoading(false);
-    }, 1500);
+    }
   };
+
 
   return (
     <div className={`app-container theme-${theme}`}>
@@ -816,6 +810,10 @@ Or paste/upload a function code block to scan it for security issues. What can I
           --color-settings-trigger-hover: #ffffff;
           --color-sidebar-toggle-btn: #b4b4b4;
           --color-sidebar-toggle-btn-hover: #ffffff;
+          
+          --color-modal-bg: #ffffff;
+          --color-modal-select-bg: #ffffff;
+          --color-modal-close-hover: #f4f4f4;
         }
 
         /* Dark Theme variables */
@@ -851,6 +849,10 @@ Or paste/upload a function code block to scan it for security issues. What can I
           --color-settings-trigger-hover: #ffffff;
           --color-sidebar-toggle-btn: #b4b4b4;
           --color-sidebar-toggle-btn-hover: #ffffff;
+          
+          --color-modal-bg: #2f2f2f;
+          --color-modal-select-bg: #212121;
+          --color-modal-close-hover: #3a3a3a;
         }
         
         * {
@@ -1012,9 +1014,6 @@ Or paste/upload a function code block to scan it for security issues. What can I
           cursor: pointer;
           font-size: 14px;
           color: var(--color-sidebar-text);
-          white-space: nowrap;
-          overflow: hidden;
-          text-overflow: ellipsis;
           transition: background-color 0.2s ease;
           display: flex;
           align-items: center;
@@ -1025,9 +1024,21 @@ Or paste/upload a function code block to scan it for security issues. What can I
           background-color: var(--color-sidebar-hover);
         }
 
+        .history-item:hover .conv-delete-btn {
+          opacity: 1 !important;
+        }
+
         .history-item.active {
           background-color: var(--color-sidebar-active);
           color: #ffffff;
+        }
+
+        .history-item.active .conv-delete-btn {
+          opacity: 0.6 !important;
+        }
+
+        .history-item.active .conv-delete-btn:hover {
+          opacity: 1 !important;
         }
 
         .sidebar-footer {
@@ -1566,7 +1577,221 @@ Or paste/upload a function code block to scan it for security issues. What can I
 
         .markdown-strong {
           font-weight: 600;
-          color: #000000;
+          color: var(--color-text-main);
+        }
+
+        .chat-textarea::placeholder {
+          color: var(--color-text-muted);
+          opacity: 0.7;
+        }
+
+        /* Toast Message Notification */
+        .toast-message {
+          position: fixed;
+          bottom: 80px;
+          left: 50%;
+          transform: translateX(-50%);
+          background-color: var(--color-bubble-user);
+          color: var(--color-bubble-user-text);
+          padding: 10px 20px;
+          border-radius: 20px;
+          font-size: 14px;
+          font-weight: 500;
+          z-index: 1000;
+          box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+          animation: toastFadeInOut 2s ease-in-out;
+        }
+
+        @keyframes toastFadeInOut {
+          0% { opacity: 0; transform: translate(-50%, 10px); }
+          10% { opacity: 1; transform: translate(-50%, 0); }
+          90% { opacity: 1; transform: translate(-50%, 0); }
+          100% { opacity: 0; transform: translate(-50%, -10px); }
+        }
+
+        /* Vulnerability Analysis Report Card styling */
+        .vuln-report-card {
+          background-color: var(--color-input-bg);
+          border: 1px solid var(--color-border);
+          border-radius: 12px;
+          padding: 20px;
+          margin: 16px 0;
+          box-shadow: 0 4px 12px rgba(0,0,0,0.03);
+          transition: all 0.3s ease;
+          width: 100%;
+        }
+
+        .vuln-report-header {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          margin-bottom: 16px;
+        }
+
+        .vuln-report-badge {
+          font-size: 11px;
+          font-weight: 600;
+          text-transform: uppercase;
+          letter-spacing: 0.05em;
+          padding: 4px 8px;
+          border-radius: 4px;
+          background-color: var(--color-border);
+          color: var(--color-text-muted);
+        }
+
+        .vuln-report-grid {
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 16px;
+          margin-bottom: 20px;
+        }
+
+        .vuln-report-item {
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+        }
+
+        .vuln-report-item.full-width {
+          grid-column: span 2;
+        }
+
+        .vuln-report-label {
+          font-size: 12px;
+          font-weight: 600;
+          text-transform: uppercase;
+          letter-spacing: 0.05em;
+          color: var(--color-text-muted);
+        }
+
+        .vuln-report-value {
+          font-size: 15px;
+          color: var(--color-text-main);
+          font-weight: 500;
+        }
+
+        .vuln-report-value.bold-value {
+          font-family: var(--font-mono);
+          font-weight: 600;
+          word-break: break-all;
+        }
+
+        .severity-badge {
+          display: inline-block;
+          padding: 2px 8px;
+          border-radius: 4px;
+          font-size: 13px;
+          font-weight: 600;
+          width: fit-content;
+        }
+
+        .sev-critical {
+          background-color: rgba(239, 68, 68, 0.1);
+          color: #ef4444;
+        }
+
+        .sev-high {
+          background-color: rgba(249, 115, 22, 0.1);
+          color: #f97316;
+        }
+
+        .sev-medium {
+          background-color: rgba(234, 179, 8, 0.1);
+          color: #eab308;
+        }
+
+        .sev-low {
+          background-color: rgba(59, 130, 246, 0.1);
+          color: #3b82f6;
+        }
+
+        .sev-info {
+          background-color: rgba(107, 114, 128, 0.1);
+          color: #6b7280;
+        }
+
+        .vuln-report-divider {
+          height: 1px;
+          background-color: var(--color-border);
+          margin: 16px 0;
+        }
+
+        .vuln-report-remediation {
+          display: flex;
+          flex-direction: column;
+        }
+
+        .remediation-sections {
+          display: flex;
+          flex-direction: column;
+          gap: 16px;
+        }
+
+        .remediation-section {
+          background-color: rgba(0, 0, 0, 0.015);
+          border-left: 3px solid var(--color-primary);
+          padding: 12px 16px;
+          border-radius: 0 8px 8px 0;
+        }
+
+        .app-container.theme-dark .remediation-section {
+          background-color: rgba(255, 255, 255, 0.02);
+        }
+
+        .remediation-title {
+          font-size: 13px;
+          font-weight: 700;
+          color: var(--color-text-main);
+          margin-bottom: 8px;
+          letter-spacing: 0.02em;
+        }
+
+        .remediation-content {
+          font-size: 14.5px;
+          line-height: 1.6;
+          color: var(--color-text-main);
+        }
+
+        .remediation-content p {
+          margin-bottom: 8px;
+        }
+
+        .remediation-content p:last-child {
+          margin-bottom: 0;
+        }
+
+        .vuln-report-footer {
+          display: flex;
+          justify-content: flex-end;
+          margin-top: 16px;
+        }
+
+        .copy-report-btn {
+          background: none;
+          border: 1px solid var(--color-border);
+          color: var(--color-text-muted);
+          cursor: pointer;
+          padding: 8px 14px;
+          border-radius: 8px;
+          display: flex;
+          align-items: center;
+          font-size: 13px;
+          font-weight: 500;
+          transition: all 0.2s ease;
+        }
+
+        .copy-report-btn:hover {
+          background-color: var(--color-border);
+          color: var(--color-text-main);
+        }
+
+        @media (max-width: 500px) {
+          .vuln-report-grid {
+            grid-template-columns: 1fr;
+          }
+          .vuln-report-item.full-width {
+            grid-column: span 1;
+          }
         }
 
         /* Typing Animation */
@@ -1615,7 +1840,8 @@ Or paste/upload a function code block to scan it for security issues. What can I
         }
 
         .modal-content {
-          background-color: #ffffff;
+          background-color: var(--color-modal-bg);
+          color: var(--color-text-main);
           border-radius: 12px;
           padding: 24px;
           width: 90%;
@@ -1656,7 +1882,7 @@ Or paste/upload a function code block to scan it for security issues. What can I
         }
 
         .modal-close-btn:hover {
-          background-color: #f4f4f4;
+          background-color: var(--color-modal-close-hover);
           color: var(--color-text-main);
         }
 
@@ -1679,7 +1905,7 @@ Or paste/upload a function code block to scan it for security issues. What can I
           padding: 10px 12px;
           border-radius: 8px;
           border: 1px solid var(--color-border);
-          background-color: #ffffff;
+          background-color: var(--color-modal-select-bg);
           color: var(--color-text-main);
           font-family: inherit;
           font-size: 14px;
@@ -1722,7 +1948,7 @@ Or paste/upload a function code block to scan it for security issues. What can I
           left: 0;
           right: 0;
           bottom: 0;
-          background-color: #ccc;
+          background-color: var(--color-border);
           transition: .4s;
           border-radius: 24px;
         }
@@ -1817,18 +2043,45 @@ Or paste/upload a function code block to scan it for security issues. What can I
         <div className="sidebar-divider"></div>
 
         <div className="sidebar-history-container">
-          {CHAT_HISTORY_LIST.map((item) => (
-            <div
-              key={item.id}
-              className={`history-item ${activeHistoryId === item.id ? 'active' : ''}`}
-              onClick={() => handleSelectHistoryItem(item.id)}
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: '#8e8e93', flexShrink: 0 }}>
-                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
-              </svg>
-              {item.title}
+          {conversations.length === 0 ? (
+            <div style={{ padding: '12px 16px', fontSize: '13px', color: 'var(--color-text-muted)', fontStyle: 'italic' }}>
+              No conversations yet
             </div>
-          ))}
+          ) : (
+            conversations
+              .slice()
+              .sort((a, b) => b.updatedAt - a.updatedAt)
+              .map((conv) => (
+                <div
+                  key={conv.id}
+                  className={`history-item ${activeConversationId === conv.id ? 'active' : ''}`}
+                  onClick={() => handleSelectHistoryItem(conv.id)}
+                  style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', overflow: 'hidden', flex: 1, minWidth: 0 }}>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: '#8e8e93', flexShrink: 0 }}>
+                      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+                    </svg>
+                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {conv.title}
+                    </span>
+                  </div>
+                  <button
+                    onClick={(e) => handleDeleteConversation(e, conv.id)}
+                    title="Delete conversation"
+                    style={{
+                      background: 'none', border: 'none', cursor: 'pointer', flexShrink: 0,
+                      color: 'var(--color-text-muted)', padding: '2px 4px', borderRadius: '4px',
+                      fontSize: '14px', lineHeight: 1, opacity: 0,
+                      transition: 'opacity 0.15s'
+                    }}
+                    className="conv-delete-btn"
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))
+          )}
         </div>
 
         <div className="sidebar-footer">
@@ -1958,15 +2211,25 @@ Or paste/upload a function code block to scan it for security issues. What can I
                 <div key={msg.id} className={`message-row ${msg.role}`}>
                   {msg.role === 'assistant' ? (
                     <>
-                      <div className="assistant-header">
-                        <div className="assistant-avatar">
-                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
-                          </svg>
-                        </div>
-                        <span className="assistant-name">Sentrix</span>
-                      </div>
-                      <MessageContent content={msg.content} />
+                      {(() => {
+                        const parsedReport = parseVulnReport(msg.content);
+                        if (parsedReport) {
+                          return <VulnReport data={parsedReport} onCopy={() => showToast('Analysis report copied to clipboard!')} />;
+                        }
+                        return (
+                          <>
+                            <div className="assistant-header">
+                              <div className="assistant-avatar">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                                  <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+                                </svg>
+                              </div>
+                              <span className="assistant-name">Sentrix</span>
+                            </div>
+                            <MessageContent content={msg.content} />
+                          </>
+                        );
+                      })()}
                     </>
                   ) : (
                     <div className="user-bubble">
@@ -1984,14 +2247,6 @@ Or paste/upload a function code block to scan it for security issues. What can I
               {/* TYPING DOTS FOR AI */}
               {isLoading && (
                 <div className="message-row assistant">
-                  <div className="assistant-header">
-                    <div className="assistant-avatar">
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
-                      </svg>
-                    </div>
-                    <span className="assistant-name">Sentrix</span>
-                  </div>
                   <div className="typing-indicator-container">
                     <span className="dot"></span>
                     <span className="dot"></span>
@@ -2156,6 +2411,11 @@ Or paste/upload a function code block to scan it for security issues. What can I
               </button>
             </div>
           </div>
+        </div>
+      )}
+      {toast && (
+        <div className="toast-message">
+          {toast}
         </div>
       )}
     </div>
