@@ -563,6 +563,7 @@ export default function App() {
   const messagesEndRef = useRef(null);
   const textareaRef = useRef(null);
   const fileInputRef = useRef(null);
+  const abortControllerRef = useRef(null);
 
   // ── Persist conversations to localStorage on every change ─────────────────
   useEffect(() => {
@@ -672,6 +673,12 @@ export default function App() {
     setAttachment(null);
   };
 
+  const handleStopGeneration = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+  };
+
   const submitMessage = async (text) => {
     const userMsg = {
       id: `msg-${Date.now()}`,
@@ -705,11 +712,15 @@ export default function App() {
     setMessages(prev => [...prev, userMsg]);
     setIsLoading(true);
 
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
     try {
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text })
+        body: JSON.stringify({ message: text }),
+        signal: controller.signal
       });
 
       const json = await response.json();
@@ -748,19 +759,34 @@ export default function App() {
       setMessages(prev => [...prev, assistantMsg]);
 
     } catch (err) {
-      const errorMsg = {
-        id: `msg-${Date.now()}`,
-        role: 'assistant',
-        content: 'Unable to reach the Sentrix backend. Please ensure the server is running on port 5001 and try again.'
-      };
-      setConversations(prev => prev.map(c =>
-        c.id === newConversationId
-          ? { ...c, messages: [...c.messages, errorMsg], updatedAt: Date.now() }
-          : c
-      ));
-      setMessages(prev => [...prev, errorMsg]);
+      if (err.name === 'AbortError') {
+        const stopMsg = {
+          id: `msg-${Date.now()}`,
+          role: 'assistant',
+          content: '_Analysis was stopped by the user._'
+        };
+        setConversations(prev => prev.map(c =>
+          c.id === newConversationId
+            ? { ...c, messages: [...c.messages, stopMsg], updatedAt: Date.now() }
+            : c
+        ));
+        setMessages(prev => [...prev, stopMsg]);
+      } else {
+        const errorMsg = {
+          id: `msg-${Date.now()}`,
+          role: 'assistant',
+          content: 'Unable to reach the Sentrix backend. Please ensure the server is running on port 5001 and try again.'
+        };
+        setConversations(prev => prev.map(c =>
+          c.id === newConversationId
+            ? { ...c, messages: [...c.messages, errorMsg], updatedAt: Date.now() }
+            : c
+        ));
+        setMessages(prev => [...prev, errorMsg]);
+      }
     } finally {
       setIsLoading(false);
+      abortControllerRef.current = null;
     }
   };
 
@@ -814,6 +840,9 @@ export default function App() {
           --color-modal-bg: #ffffff;
           --color-modal-select-bg: #ffffff;
           --color-modal-close-hover: #f4f4f4;
+          
+          --color-vuln-card-bg: #ffffff;
+          --color-vuln-card-border: #e5e5e5;
         }
 
         /* Dark Theme variables */
@@ -822,9 +851,9 @@ export default function App() {
           --color-text-main: #ececec;
           --color-text-muted: #b4b4b4;
           --color-border: #2f2f2f;
-          --color-input-bg: #2f2f2f;
-          --color-input-border: #2f2f2f;
-          --color-bubble-user: #2f2f2f;
+          --color-input-bg: #181818;
+          --color-input-border: #333333;
+          --color-bubble-user: #181818;
           --color-bubble-user-text: #ffffff;
           --color-assistant-name: #ffffff;
           --color-blockquote-bg: #2f2f2f;
@@ -853,6 +882,9 @@ export default function App() {
           --color-modal-bg: #2f2f2f;
           --color-modal-select-bg: #212121;
           --color-modal-close-hover: #3a3a3a;
+          
+          --color-vuln-card-bg: #383838;
+          --color-vuln-card-border: #444444;
         }
         
         * {
@@ -1611,8 +1643,8 @@ export default function App() {
 
         /* Vulnerability Analysis Report Card styling */
         .vuln-report-card {
-          background-color: var(--color-input-bg);
-          border: 1px solid var(--color-border);
+          background-color: var(--color-vuln-card-bg);
+          border: 1px solid var(--color-vuln-card-border);
           border-radius: 12px;
           padding: 20px;
           margin: 16px 0;
@@ -1712,7 +1744,7 @@ export default function App() {
 
         .vuln-report-divider {
           height: 1px;
-          background-color: var(--color-border);
+          background-color: var(--color-vuln-card-border);
           margin: 16px 0;
         }
 
@@ -1768,7 +1800,7 @@ export default function App() {
 
         .copy-report-btn {
           background: none;
-          border: 1px solid var(--color-border);
+          border: 1px solid var(--color-vuln-card-border);
           color: var(--color-text-muted);
           cursor: pointer;
           padding: 8px 14px;
@@ -1781,7 +1813,7 @@ export default function App() {
         }
 
         .copy-report-btn:hover {
-          background-color: var(--color-border);
+          background-color: var(--color-vuln-card-border);
           color: var(--color-text-main);
         }
 
@@ -2287,21 +2319,27 @@ export default function App() {
                 ref={textareaRef}
                 className="chat-textarea"
                 rows="1"
-                placeholder="Ask anything about cybersecurity, or paste code to scan..."
+                placeholder="Describe a security finding or paste assessment notes"
                 value={inputValue}
                 onChange={(e) => setInputValue(e.target.value)}
                 onKeyDown={handleKeyDown}
               />
               <button
-                className={`send-btn ${(inputValue.trim() || attachment) ? 'active' : ''}`}
-                onClick={handleSubmit}
-                disabled={!inputValue.trim() && !attachment}
-                title="Send message"
+                className={`send-btn ${isLoading || (inputValue.trim() || attachment) ? 'active' : ''}`}
+                onClick={isLoading ? handleStopGeneration : handleSubmit}
+                disabled={!isLoading && !inputValue.trim() && !attachment}
+                title={isLoading ? "Stop generating" : "Send message"}
               >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
-                  <line x1="12" y1="19" x2="12" y2="5"></line>
-                  <polyline points="5 12 12 5 19 12"></polyline>
-                </svg>
+                {isLoading ? (
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                    <rect x="4" y="4" width="16" height="16" rx="2" />
+                  </svg>
+                ) : (
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                    <line x1="12" y1="19" x2="12" y2="5"></line>
+                    <polyline points="5 12 12 5 19 12"></polyline>
+                  </svg>
+                )}
               </button>
             </div>
           </div>
