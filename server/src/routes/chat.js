@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { preFilterTitles, getVulnerabilityByTitle } from '../services/vulnerabilityService.js';
 import { matchVulnerability, matchMultipleVulnerabilities, classifyAndRemediate } from '../services/openaiService.js';
 import { CATEGORIES } from '../config/categories.js';
+import { PDFParse } from 'pdf-parse';
 
 const router = Router();
 
@@ -170,17 +171,51 @@ async function runSingleFindingPipeline(rawTitle, userMessage) {
  *  Steps 2b–4 — Virtual alias → DB fetch → GPT Phase 2 (per finding)
  */
 router.post('/chat', async (req, res) => {
-  const { message } = req.body;
+  const { message, attachment } = req.body;
 
   // ── Validate input ───────────────────────────────────────────────────────
-  if (!message || typeof message !== 'string' || message.trim().length === 0) {
+  const hasMessage = message && typeof message === 'string' && message.trim().length > 0;
+  const hasPdfAttachment = attachment && attachment.type === 'pdf' && attachment.content;
+
+  if (!hasMessage && !hasPdfAttachment) {
     return res.status(400).json({
       success: false,
-      message: 'Request body must include a non-empty "message" string.'
+      message: 'Request body must include a non-empty "message" string or a PDF attachment.'
     });
   }
 
-  const userMessage = message.trim();
+  let processedMessage = hasMessage ? message.trim() : '';
+
+  if (hasPdfAttachment) {
+    try {
+      console.log(`[PDF Extraction] Extracting text from PDF: "${attachment.name}"...`);
+      const base64Data = attachment.content.split(';base64,').pop();
+      const buffer = Buffer.from(base64Data, 'base64');
+      const parser = new PDFParse({ data: buffer });
+      const textResult = await parser.getText();
+      const extractedText = textResult.text;
+      
+      if (extractedText && extractedText.trim().length > 0) {
+        processedMessage = processedMessage
+          ? `${processedMessage}\n\n[Extracted from PDF ${attachment.name}]:\n${extractedText.trim()}`
+          : extractedText.trim();
+      } else {
+        console.warn('[PDF Extraction] ⚠️ Extracted PDF text is empty.');
+        return res.status(200).json({
+          success: false,
+          message: `The PDF file "${attachment.name}" does not contain any readable text. Please ensure it is not scanned/OCR-only.`
+        });
+      }
+    } catch (pdfErr) {
+      console.error('[PDF Extraction] ❌ Error extracting text from PDF:', pdfErr.message);
+      return res.status(200).json({
+        success: false,
+        message: `Failed to extract text from the PDF file: ${pdfErr.message}`
+      });
+    }
+  }
+
+  const userMessage = processedMessage.trim();
   console.log(`\n[/api/chat] Received: "${userMessage.substring(0, 80)}${userMessage.length > 80 ? '...' : ''}"`);
 
   try {
