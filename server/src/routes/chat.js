@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { preFilterTitles, getVulnerabilityByTitle } from '../services/vulnerabilityService.js';
-import { matchVulnerability, classifyAndRemediate } from '../services/openaiService.js';
+import { matchVulnerability, matchMultipleVulnerabilities, classifyAndRemediate } from '../services/openaiService.js';
 import { CATEGORIES } from '../config/categories.js';
 
 const router = Router();
@@ -90,27 +90,84 @@ function injectCriticalTitles(userMessage, candidateTitles) {
   return [...titleSet];
 }
 
+// ─── VIRTUAL TITLE ALIASES ─────────────────────────────────────────────────────
+// Maps GPT shorthand labels (NOT real DB titles) to their correct DB counterparts.
+// Shared between single and multi-finding pipelines.
+const VIRTUAL_TITLE_ALIASES = {
+  'IDOR':               'Privacy_Violation',       // IDOR → access to other users' records
+  'Debug_Modes_Enabled': 'Session Misconfiguration' // debug in prod → nearest config-level DB record
+};
+
+/**
+ * Runs Steps 2b–4 for a single matched title:
+ *  - Virtual alias resolution
+ *  - DB record fetch (three-tier)
+ *  - GPT Phase 2 classify + remediate
+ *
+ * Returns { result } on success, or { error: string } on soft failure
+ * (so the caller can skip failed findings gracefully in the multi path).
+ *
+ * @param {string} rawTitle     - Title from Phase 1 (already sanitized)
+ * @param {string} userMessage  - Original user message (for Phase 2 context)
+ * @returns {Promise<{result?: Object, error?: string}>}
+ */
+async function runSingleFindingPipeline(rawTitle, userMessage) {
+  // ── Virtual alias resolution ─────────────────────────────────────────────
+  let matchedTitle = rawTitle;
+  let virtualContext = null;
+
+  if (VIRTUAL_TITLE_ALIASES[matchedTitle]) {
+    const alias = VIRTUAL_TITLE_ALIASES[matchedTitle];
+    virtualContext = matchedTitle;
+    console.log(`[Pipeline] Virtual alias: "${matchedTitle}" → "${alias}"`);
+    matchedTitle = alias;
+  }
+
+  // ── DB fetch ─────────────────────────────────────────────────────────────
+  let vulnerability;
+  try {
+    const dbResult = await getVulnerabilityByTitle(matchedTitle);
+    vulnerability = dbResult.record;
+  } catch (dbErr) {
+    console.error(`[Pipeline] DB error for "${matchedTitle}":`, dbErr.message);
+    return { error: `DB unavailable for "${rawTitle}"` };
+  }
+
+  if (!vulnerability) {
+    console.warn(`[Pipeline] ❌ No DB record for "${matchedTitle}"`);
+    return { error: `Record not found for "${rawTitle}"` };
+  }
+
+  // ── GPT Phase 2 ───────────────────────────────────────────────────────────
+  try {
+    const result = await classifyAndRemediate(userMessage, vulnerability, CATEGORIES, virtualContext);
+    return { result };
+  } catch (aiErr) {
+    console.error(`[Pipeline] Phase 2 error for "${rawTitle}":`, aiErr.message);
+    return { error: `Classification failed for "${rawTitle}"` };
+  }
+}
+
 /**
  * POST /api/chat
  *
+ * Automatically detects single vs. multi-finding inputs:
+ *
+ * Single finding path (backward compatible):
+ *   Response: { success: true, data: { matched_vulnerability, category, subcategory, severity, remediation, type } }
+ *
+ * Multi-finding path (new):
+ *   Response: { success: true, multi: true, findings: [ ...singleDataObjects ] }
+ *
+ * No match: { success: false, message: string }
+ * Error:    { success: false, message: string }
+ *
  * Pipeline:
- *  Step 1 — SQL pre-filter: extract keywords from user message, run targeted
- *            LIKE query across title/synopsis/threat/technology columns to get
- *            a narrow candidate set (falls back to all titles if set is too small).
- *
- *  Step 2 — GPT Phase 1: select the single best matching vulnerability title
- *            from the candidate set. Returns exact title string or "NO_MATCH".
- *
- *  Step 3 — SQL fetch: retrieve the full vulnerability record by title.
- *            Uses three-tier resolution: exact → fuzzy prefix → case-insensitive LIKE.
- *
- *  Step 4 — GPT Phase 2: classify into a business category and generate
- *            a concise remediation recommendation.
- *
- * Request body : { message: string }
- * Success (200): { success: true, data: { matched_vulnerability, category, subcategory, severity, remediation, type } }
- * No match (200): { success: false, message: string }
- * Error (500/503): { success: false, message: string }
+ *  Step 1  — SQL pre-filter + critical title injection
+ *  Step 1b — GPT Multi-Match: detect ALL matched vulnerability titles
+ *  Step 2  — If multi (>1 title): run Steps 2b–4 in parallel for each title
+ *            If single (1 title): run the standard single-finding path
+ *  Steps 2b–4 — Virtual alias → DB fetch → GPT Phase 2 (per finding)
  */
 router.post('/chat', async (req, res) => {
   const { message } = req.body;
@@ -149,115 +206,102 @@ router.post('/chat', async (req, res) => {
     console.log(`[Step 1] Candidate titles from pre-filter: ${candidateTitles.length}`);
 
     // ── Step 1a: Critical title injection ────────────────────────────────────
-    // Guarantees that known hard-to-match vulnerability titles are always
-    // included in the candidate set when the user message matches their pattern.
     candidateTitles = injectCriticalTitles(userMessage, candidateTitles);
     console.log(`[Step 1] Final candidate titles sent to Phase 1: ${candidateTitles.length}`);
 
-    // ── Step 2: GPT Phase 1 — match vulnerability title ─────────────────────
-    let matchedTitle;
+    // ── Step 1b: Multi-Match — detect ALL vulnerabilities in the input ────────
+    let matchedTitles;
     try {
-      matchedTitle = await matchVulnerability(userMessage, candidateTitles);
+      matchedTitles = await matchMultipleVulnerabilities(userMessage, candidateTitles);
     } catch (aiErr) {
-      console.error('[Step 2] OpenAI Phase 1 error:', aiErr.message);
+      console.error('[Step 1b] Multi-Match error:', aiErr.message);
       return res.status(503).json({
         success: false,
         message: 'AI service is temporarily unavailable. Please try again shortly.'
       });
     }
 
-    // ── Step 2a: Sanitize Phase 1 output ─────────────────────────────────────
-    // GPT may occasionally wrap the title in quotes or add trailing punctuation.
-    // Strip those so the exact title lookup has the best chance of succeeding.
-    const cleanedTitle = matchedTitle
-      .replace(/^["'`]|["'`]$/g, '')   // remove surrounding quotes
-      .replace(/[.,;!?]+$/, '')          // remove trailing punctuation
-      .trim();
+    if (matchedTitles.length === 0) {
+      // ── Fallback: try single-match in case multi-match is overly strict ────
+      console.log('[Step 1b] Multi-match returned 0 — falling back to single-match Phase 1');
+      let singleTitle;
+      try {
+        singleTitle = await matchVulnerability(userMessage, candidateTitles);
+      } catch (aiErr) {
+        console.error('[Step 2 fallback] OpenAI Phase 1 error:', aiErr.message);
+        return res.status(503).json({
+          success: false,
+          message: 'AI service is temporarily unavailable. Please try again shortly.'
+        });
+      }
 
-    if (cleanedTitle !== matchedTitle) {
-      console.log(`[Step 2] ⚠️  Phase 1 output sanitized: "${matchedTitle}" → "${cleanedTitle}"`);
-      matchedTitle = cleanedTitle;
+      const cleanedSingle = singleTitle
+        .replace(/^["'`]|["'`]$/g, '')
+        .replace(/[.,;!?]+$/, '')
+        .trim();
+
+      if (!cleanedSingle || cleanedSingle === 'NO_MATCH') {
+        return res.status(200).json({
+          success: false,
+          message: 'No relevant vulnerability was found matching your description. Try rephrasing or providing more specific technical details about the security issue.'
+        });
+      }
+      matchedTitles = [cleanedSingle];
     }
 
-    if (!matchedTitle || matchedTitle === 'NO_MATCH') {
-      console.log('[Step 2] GPT Phase 1 returned NO_MATCH');
-      return res.status(200).json({
-        success: false,
-        message: 'No relevant vulnerability was found matching your description. Try rephrasing or providing more specific technical details about the security issue.'
-      });
-    }
+    // ── Route: single vs. multi ──────────────────────────────────────────────
+    if (matchedTitles.length === 1) {
+      // ── SINGLE FINDING — original pipeline, original response shape ──────
+      console.log(`[/api/chat] Single finding: "${matchedTitles[0]}"`);
+      const { result, error } = await runSingleFindingPipeline(matchedTitles[0], userMessage);
 
-    console.log(`[Step 2] GPT Phase 1 matched: "${matchedTitle}"`);
+      if (error) {
+        return res.status(200).json({ success: false, message: error });
+      }
 
-    // ── Step 2b: Virtual title alias resolution ────────────────────────────────
-    // Maps GPT shorthand labels (that are NOT real DB titles) to their correct
-    // DB counterparts. Runs after sanitization, before the DB lookup.
-    // This lets prompt authors use human-readable labels like "IDOR" in the
-    // semantic mapping table without those labels needing to exist in the DB.
-    const VIRTUAL_TITLE_ALIASES = {
-      'IDOR':               'Privacy_Violation',    // IDOR → access to other users' records
-      'Debug_Modes_Enabled': 'Session Misconfiguration'  // debug in prod → nearest config-level DB record
-    };
+      console.log(`[/api/chat] ✅ Done — ${result.matched_vulnerability} | ${result.category} / ${result.subcategory} | Type: ${result.type} | ${result.severity}`);
+      return res.status(200).json({ success: true, data: result });
 
-    // Track whether a virtual alias was applied and what the original label was.
-    // This is forwarded to Phase 2 so GPT classifies by the actual vulnerability
-    // type, not by the proxy DB record's content.
-    let virtualContext = null;
-
-    if (VIRTUAL_TITLE_ALIASES[matchedTitle]) {
-      const alias = VIRTUAL_TITLE_ALIASES[matchedTitle];
-      virtualContext = matchedTitle;   // preserve original label for Phase 2 override
-      console.log(`[Step 2b] Virtual title alias resolved: "${matchedTitle}" → "${alias}" (virtualContext retained)`);
-      matchedTitle = alias;
     } else {
-      console.log('[Step 2b] No virtual alias needed.');
-    }
+      // ── MULTI-FINDING — run all pipelines in parallel ────────────────────
+      console.log(`[/api/chat] Multi-finding: ${matchedTitles.length} vulnerabilities detected: ${matchedTitles.join(', ')}`);
 
-    // ── Step 3: SQL fetch — full vulnerability record ─────────────────────
-    let vulnerability;
-    let resolvedTitle;
-    try {
-      const result = await getVulnerabilityByTitle(matchedTitle);
-      vulnerability = result.record;
-      resolvedTitle = result.resolvedTitle;
-    } catch (dbErr) {
-      console.error('[Step 3] DB error during record fetch:', dbErr.message);
-      return res.status(503).json({
-        success: false,
-        message: 'Database is temporarily unavailable. Please try again shortly.'
-      });
-    }
+      const pipelineResults = await Promise.all(
+        matchedTitles.map(title => runSingleFindingPipeline(title, userMessage))
+      );
 
-    if (!vulnerability) {
-      // All three resolution tiers failed — GPT matched something not in DB at all
-      console.warn(`[Step 3] ❌ Title "${matchedTitle}" not found in DB after all resolution attempts.`);
+      const successfulFindings = pipelineResults
+        .filter(r => r.result)
+        .map(r => r.result);
+
+      const failedTitles = pipelineResults
+        .map((r, i) => r.error ? matchedTitles[i] : null)
+        .filter(Boolean);
+
+      if (failedTitles.length > 0) {
+        console.warn(`[/api/chat] ⚠️  Some findings failed: ${failedTitles.join(', ')}`);
+      }
+
+      if (successfulFindings.length === 0) {
+        return res.status(200).json({
+          success: false,
+          message: 'Multiple vulnerabilities were detected but none could be fully classified. Please try again.'
+        });
+      }
+
+      if (successfulFindings.length === 1) {
+        // Degrade gracefully to single if only 1 succeeded
+        console.log(`[/api/chat] ✅ Degraded to single-finding (only 1 of ${matchedTitles.length} succeeded)`);
+        return res.status(200).json({ success: true, data: successfulFindings[0] });
+      }
+
+      console.log(`[/api/chat] ✅ Multi-finding done — ${successfulFindings.length} findings`);
       return res.status(200).json({
-        success: false,
-        message: `A vulnerability was identified (${matchedTitle}), but its full record could not be retrieved. Please contact your administrator.`
+        success: true,
+        multi: true,
+        findings: successfulFindings
       });
     }
-
-    console.log(`[Step 3] Record retrieved: "${resolvedTitle}" (requested: "${matchedTitle}")`);
-
-    // ── Step 4: GPT Phase 2 — classify + remediate ──────────────────────────
-    let result;
-    try {
-      result = await classifyAndRemediate(userMessage, vulnerability, CATEGORIES, virtualContext);
-    } catch (aiErr) {
-      console.error('[Step 4] OpenAI Phase 2 error:', aiErr.message);
-      return res.status(503).json({
-        success: false,
-        message: 'AI classification service encountered an error. Please try again.'
-      });
-    }
-
-    // ── Success ───────────────────────────────────────────────────────────────────
-    console.log(`[/api/chat] ✅ Done — ${result.matched_vulnerability} | ${result.category} / ${result.subcategory} | Type: ${result.type} | ${result.severity}`);
-
-    return res.status(200).json({
-      success: true,
-      data: result
-    });
 
   } catch (unexpectedErr) {
     console.error('[/api/chat] Unexpected error:', unexpectedErr);

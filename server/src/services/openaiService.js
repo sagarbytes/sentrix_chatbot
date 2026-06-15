@@ -81,6 +81,93 @@ function parseAiRemediation(raw) {
 // ─── Phase 1: Vulnerability Matching ─────────────────────────────────────────
 
 /**
+ * Asks GPT to identify ALL relevant vulnerability titles from the candidate
+ * set that are described in the user's message. Returns a JSON array of
+ * exact title strings. Used as the multi-finding detection gate.
+ *
+ * If the user describes only one issue, the array will have length 1.
+ * If multiple distinct vulnerabilities are described, it returns all of them.
+ *
+ * @param {string} userMessage - The user's natural language security description
+ * @param {string[]} titles    - Pre-filtered list of candidate vulnerability titles
+ * @returns {Promise<string[]>} - Array of exact matched titles (may be empty)
+ */
+export async function matchMultipleVulnerabilities(userMessage, titles) {
+  const titlesBlock = titles.join('\n');
+
+  const completion = await client.chat.completions.create({
+    model: MODEL,
+    temperature: 0,
+    response_format: { type: 'json_object' },
+    messages: [
+      {
+        role: 'system',
+        content: [
+          'You are a cybersecurity vulnerability matching engine.',
+          'You will receive a user-reported security assessment and a list of known vulnerability titles.',
+          'Your task: identify ALL vulnerability titles from the list that are clearly and distinctly described in the user\'s message.',
+          '',
+          'Rules:',
+          '- Return a JSON object with a single key "matches" containing an array of exact title strings.',
+          '- Only include titles that appear verbatim in the provided list.',
+          '- Include a title only if the user\'s message clearly and specifically describes that vulnerability as a distinct finding.',
+          '- Do NOT include a title if it is only tangentially or generically related.',
+          '- If the user describes only one vulnerability, return an array with exactly one title.',
+          '- If no vulnerability matches, return {"matches": []}.',
+          '- Never fabricate or paraphrase titles. Only return strings that appear verbatim in the list.',
+          '- When the issue involves access control, object-level authorisation, or field-level privilege (IDOR, Mass Assignment), do NOT select an Input Validation title.',
+          '',
+          'Semantic matching guidance (same as single-match mode):',
+          '- "HSTS", "missing HSTS header", "downgrade attack", "browsers do not enforce HTTPS" → Missing_HSTS_Header',
+          '- "IDOR", "insecure direct object reference", "access records belonging to other users" → IDOR',
+          '- "debug mode", "debugging enabled", "diagnostic mode enabled" → Debug_Modes_Enabled',
+          '- "sensitive data in URL", "JWT in URL", "token in query string" → Sensitive Data in URL',
+          '- "mass assignment", "hidden parameter manipulation", "update admin-only fields" → Mass Assignment',
+          '- "SQL injection", "unsanitised query", "concatenated SQL" → Client_Potential_Code_Injection',
+          '- "XSS", "cross-site scripting", "reflected input" → Improper Input Validation',
+          '- "CSRF", "cross-site request forgery", "missing anti-forgery token" → CSRF',
+        ].join('\n')
+      },
+      {
+        role: 'user',
+        content: [
+          `User-reported issue:\n${userMessage}`,
+          '',
+          `Vulnerability titles:\n${titlesBlock}`
+        ].join('\n')
+      }
+    ]
+  });
+
+  const raw = completion.choices[0]?.message?.content || '{"matches":[]}';
+
+  // Strip possible markdown fences
+  const cleanRaw = raw
+    .replace(/^```json\s*/i, '')
+    .replace(/^```\s*/, '')
+    .replace(/\s*```$/, '')
+    .trim();
+
+  try {
+    const parsed = JSON.parse(cleanRaw);
+    const matches = Array.isArray(parsed.matches) ? parsed.matches : [];
+    // Sanitize each title the same way as single-match mode
+    const sanitized = matches
+      .map(t => String(t)
+        .replace(/^["'`]|["'`]$/g, '')
+        .replace(/[.,;!?]+$/, '')
+        .trim()
+      )
+      .filter(t => t.length > 0 && t !== 'NO_MATCH' && titles.includes(t));
+    console.log(`[GPT Multi-Match] Detected ${sanitized.length} vulnerability/vulnerabilities: ${sanitized.join(', ') || '(none)'}`);
+    return sanitized;
+  } catch (e) {
+    console.error('[GPT Multi-Match] JSON parse error — falling back to empty:', e.message);
+    return [];
+  }
+}
+
+/**
  * Asks GPT to identify the single most relevant vulnerability title
  * from the pre-filtered candidate list, based on the user's message.
  *
@@ -262,7 +349,9 @@ export async function classifyAndRemediate(userMessage, vulnerability, categorie
           '',
           `Matched vulnerability record:\n${vulnBlock}`,
           '',
-          `Available business categories:\n${categoriesBlock}`
+          `Available business categories:\n${categoriesBlock}`,
+          '',
+          `IMPORTANT: The "User issue" above may describe multiple distinct findings/vulnerabilities. You must ONLY classify and write remediation for the specific vulnerability matched in the record: "${virtualContext || vulnerability.title}". Completely ignore the other unrelated findings mentioned in the "User issue" when constructing the remediation sections (Immediate Actions, Verification, Long-Term Measures).`
         ].join('\n')
       }
     ]
