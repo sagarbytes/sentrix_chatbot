@@ -381,7 +381,7 @@ export async function classifyAndRemediate(userMessage, vulnerability, categorie
     throw new Error(`GPT Phase 2 returned unparseable JSON: ${parseErr.message}`);
   }
 
-  const missingFields = ['matched_vulnerability', 'category', 'subcategory', 'severity', 'remediation', 'type']
+  const missingFields = ['matched_vulnerability', 'category', 'subcategory', 'severity', 'type']
     .filter(f => !parsed[f]);
   if (missingFields.length > 0) {
     console.error(

@@ -3,6 +3,7 @@ import { preFilterTitles, getVulnerabilityByTitle } from '../services/vulnerabil
 import { matchVulnerability, matchMultipleVulnerabilities, classifyAndRemediate } from '../services/openaiService.js';
 import { CATEGORIES } from '../config/categories.js';
 import { PDFParse } from 'pdf-parse';
+import { detectIntent, handleKnowledgeQuery } from '../services/knowledgeService.js';
 
 const router = Router();
 
@@ -155,7 +156,7 @@ async function runSingleFindingPipeline(rawTitle, userMessage) {
  * Automatically detects single vs. multi-finding inputs:
  *
  * Single finding path (backward compatible):
- *   Response: { success: true, data: { matched_vulnerability, category, subcategory, severity, remediation, type } }
+ *   Response: { success: true, data: { matched_vulnerability, category, subcategory, severity, type } }
  *
  * Multi-finding path (new):
  *   Response: { success: true, multi: true, findings: [ ...singleDataObjects ] }
@@ -219,6 +220,42 @@ router.post('/chat', async (req, res) => {
   console.log(`\n[/api/chat] Received: "${userMessage.substring(0, 80)}${userMessage.length > 80 ? '...' : ''}"`);
 
   try {
+    // ── Intent Detection & Routing ──────────────────────────────────────────
+    const intentResult = await detectIntent(userMessage);
+    console.log(`[Intent Detection] Classified as: "${intentResult.intent}" (Reason: ${intentResult.reason})`);
+
+    if (intentResult.intent === 'unclear') {
+      console.log('[/api/chat] Intent is unclear. Requesting clarification...');
+      return res.status(200).json({
+        success: true,
+        is_knowledge_query: true,
+        is_vuln_list: false,
+        answer: "I'm sorry, I couldn't quite understand your request. Could you please rephrase or clarify if you're asking about the vulnerability repository or reporting a new finding?"
+      });
+    }
+
+    if (intentResult.intent === 'conceptual_security') {
+      console.log('[/api/chat] Routing to Conceptual Security pipeline...');
+      const queryResult = await handleKnowledgeQuery(userMessage, true);
+      console.log('[/api/chat] ✅ Done — Conceptual Security query processed.');
+      return res.status(200).json({
+        success: true,
+        is_knowledge_query: true,
+        ...queryResult
+      });
+    }
+
+    if (intentResult.intent === 'knowledge_base_query') {
+      console.log('[/api/chat] Routing to Knowledge Base Query pipeline...');
+      const queryResult = await handleKnowledgeQuery(userMessage, false);
+      console.log('[/api/chat] ✅ Done — Knowledge Base Query processed.');
+      return res.status(200).json({
+        success: true,
+        is_knowledge_query: true,
+        ...queryResult
+      });
+    }
+
     // ── Step 1: SQL pre-filter ───────────────────────────────────────────────
     let candidateTitles;
     try {

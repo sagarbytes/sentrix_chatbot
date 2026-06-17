@@ -43,7 +43,9 @@ export const SUBCATEGORIES = {
     'Open Ports / Services',
     'Misconfigured Cloud Resources',
     'Debug Modes Enabled',
-    'Weak Firewall Rules'
+    'Weak Firewall Rules',
+    'Vulnerable Dependencies & Outdated Libraries',
+    'Client-Side Hardening & Deprecated APIs'
   ],
   'Input Handling & Injection': [
     'SQL Injection',
